@@ -1,6 +1,8 @@
 #include <string.h>
+#include <etstimer.h>
 #include <esplibs/libmain.h>
 #include "button.h"
+
 
 typedef struct _button {
     uint8_t gpio_num;
@@ -8,9 +10,10 @@ typedef struct _button {
 
     uint16_t debounce_time;
     uint16_t long_press_time;
+    uint16_t double_press_time;
 
-    bool pressed_value;
-
+    uint8_t press_count;
+    ETSTimer press_timer;
     uint32_t last_press_time;
     uint32_t last_event_time;
 
@@ -40,21 +43,41 @@ void button_intr_callback(uint8_t gpio) {
         // debounce time, ignore events
         return;
     }
+
     button->last_event_time = now;
-    if (gpio_read(button->gpio_num) == button->pressed_value) {
-        // Record when the button is pressed down.
+    if (gpio_read(button->gpio_num) == 1) {
         button->last_press_time = now;
     } else {
-        // The button is released. Handle the use cases.
-        if ((now - button->last_press_time) * portTICK_PERIOD_MS > button->long_press_time) {
+        if ((now - button->last_press_time)*portTICK_PERIOD_MS > button->long_press_time) {
+            button->press_count = 0;
+
             button->callback(button->gpio_num, button_event_long_press);
         } else {
-            button->callback(button->gpio_num, button_event_single_press);
+            button->press_count++;
+            if (button->press_count > 1) {
+                button->press_count = 0;
+                sdk_os_timer_disarm(&button->press_timer);
+
+                button->callback(button->gpio_num, button_event_double_press);
+            } else {
+                sdk_os_timer_arm(&button->press_timer, button->double_press_time, 1);
+            }
         }
     }
 }
 
-int button_create(const uint8_t gpio_num, bool pressed_value, uint16_t long_press_time, button_callback_fn callback) {
+
+void button_timer_callback(void *arg) {
+    button_t *button = arg;
+
+    button->press_count = 0;
+    sdk_os_timer_disarm(&button->press_timer);
+
+    button->callback(button->gpio_num, button_event_single_press);
+}
+
+
+int button_create(const uint8_t gpio_num, button_callback_fn callback) {
     button_t *button = button_find_by_gpio(gpio_num);
     if (button)
         return -1;
@@ -63,21 +86,20 @@ int button_create(const uint8_t gpio_num, bool pressed_value, uint16_t long_pres
     memset(button, 0, sizeof(*button));
     button->gpio_num = gpio_num;
     button->callback = callback;
-    button->pressed_value = pressed_value;
 
     // times in milliseconds
     button->debounce_time = 50;
-    button->long_press_time = long_press_time;
-
-    uint32_t now = xTaskGetTickCountFromISR();
-    button->last_event_time = now;
-    button->last_press_time = now;
+    button->long_press_time = 4000;
+    button->double_press_time = 500;
 
     button->next = buttons;
     buttons = button;
 
     gpio_set_pullup(button->gpio_num, true, true);
     gpio_set_interrupt(button->gpio_num, GPIO_INTTYPE_EDGE_ANY, button_intr_callback);
+
+    sdk_os_timer_disarm(&button->press_timer);
+    sdk_os_timer_setfn(&button->press_timer, button_timer_callback, button);
 
     return 0;
 }
@@ -103,7 +125,8 @@ void button_delete(const uint8_t gpio_num) {
     }
 
     if (button) {
-        gpio_set_interrupt(gpio_num, GPIO_INTTYPE_EDGE_ANY, NULL);
+        sdk_os_timer_disarm(&button->press_timer);
+        gpio_set_interrupt(button->gpio_num, GPIO_INTTYPE_EDGE_ANY, NULL);
     }
 }
 

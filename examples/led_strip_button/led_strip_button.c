@@ -326,7 +326,7 @@ void user_init(void) {
   wifi_config_init("LED Lamp-", NULL, on_wifi_ready);
   led_init();
 
-  if (button_create(button_gpio, 0, 4000, button_callback)) {
+  if (button_create(button_gpio, button_callback)) {
     printf("Failed to initialize button\n");
   }
 }
